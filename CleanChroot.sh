@@ -7,7 +7,7 @@
 CHROOT=${CHROOT:-/mnt/ec2-root}
 CLOUDCFG="$CHROOT/etc/cloud/cloud.cfg"
 JRNLCNF="$CHROOT/etc/systemd/journald.conf"
-MAINTUSR="maintuser"
+MAINTUSR=${MAINTUSR:-"maintuser"}
 
 # Disable EPEL repos
 chroot "${CHROOT}" yum-config-manager --disable "*epel*" > /dev/null
@@ -35,6 +35,9 @@ then
    chroot "${CHROOT}" systemd-tmpfiles --create --prefix /var/log/journal
 fi
 
+# Help prevent longer-lived systems running out of space on /boot
+sed -i '/^installonly_limit=/s/[0-9][0-9]*$/2/' "${CHROOT}/etc/yum.conf"
+
 # Set TZ to UTC
 rm "${CHROOT}/etc/localtime"
 cp "${CHROOT}/usr/share/zoneinfo/UTC" "${CHROOT}/etc/localtime"
@@ -53,12 +56,13 @@ sed -i '/^system_info/,/^  ssh_svcname/d' "${CLOUDCFG}"
 sed -i '/syntax=yaml/i\
 system_info:\
   default_user:\
-    name: maintuser\
+    name: '"${MAINTUSR}"'\
     lock_passwd: true\
     gecos: Local Maintenance User\
     groups: [wheel, adm]\
     sudo: ["ALL=(root) NOPASSWD:ALL"]\
     shell: /bin/bash\
+    selinux_user: unconfined_u\
   distro: rhel\
   paths:\
     cloud_dir: /var/lib/cloud\
@@ -66,4 +70,7 @@ system_info:\
   ssh_svcname: sshd\
 ' "${CLOUDCFG}"
 fi
+
+# Update NS-Switch map-file for SEL-enabled environment
+printf "%-12s %s\n" sudoers: files >> "${CHROOT}/etc/nsswitch.conf"
 

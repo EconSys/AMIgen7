@@ -6,37 +6,95 @@
 #####################################
 PROGNAME=$(basename "$0")
 CHROOT="${CHROOT:-/mnt/ec2-root}"
-if [[ $(rpm --quiet -q redhat-release-server)$? -eq 0 ]]
-then
-   OSREPOS=(
-      rhui-REGION-client-config-server-7
-      rhui-REGION-rhel-server-releases
-      rhui-REGION-rhel-server-rh-common
-      rhui-REGION-rhel-server-optional
-      rhui-REGION-rhel-server-extras
-   )
-elif [[ $(rpm --quiet -q centos-release)$? -eq 0 ]]
-then
-   OSREPOS=(
-      os
-      base
-      updates
-      extras
-   )
-fi
+
+case $( rpm -qf /etc/os-release --qf '%{name}' ) in
+   centos-release)
+      OSREPOS=(
+         os
+         base
+         updates
+         extras
+      )
+      ;;
+   oraclelinux-release)
+      OSREPOS=(
+         ol7_latest
+         ol7_UEKR5
+      )
+      ;;
+   redhat-release-server)
+      OSREPOS=(
+         rhui-REGION-client-config-server-7
+         rhui-REGION-rhel-server-releases
+         rhui-REGION-rhel-server-rh-common
+         rhui-REGION-rhel-server-optional
+         rhui-REGION-rhel-server-extras
+      )
+      ;;
+   *)
+      echo "Unknown OS. Aborting" >&2
+      exit 1
+      ;;
+esac
+
 DEFAULTREPOS=$(printf ",%s" "${OSREPOS[@]}" | sed 's/^,//')
+EXPANDED=()
 FIPSDISABLE="${FIPSDISABLE:-UNDEF}"
+MANIFESTFILE=""
+PKGLIST=()
+RPMGRP="core"
 YCM="/bin/yum-config-manager"
 
-function PrepChroot() {
-   local REPOPKGS=($(echo \
-                     "$(rpm --qf '%{name}\n' -qf /etc/redhat-release)" ; \
-                     echo "$(rpm --qf '%{name}\n' -qf \
-                            /etc/yum.repos.d/* 2>&1 | \
-                            grep -v "not owned" | sort -u)" ; \
-                     echo yum-utils
-                   ))
+export EXPANDED PKGLIST
 
+# Print out a basic usage message
+function UsageMsg {
+   (
+## r:b:e:hm:
+## repouri:,bonusrepos:,extras:,help,pkg-manifest:
+      echo "Usage: ${0} [GNU long option] [option] ..."
+      echo "  Options:"
+      printf "\t-b <REPOS_TO_ACTIVATE>\n"
+      printf "\t-e <EXTRA_RPMS>\n"
+      printf "\t-g <RPM_GROUP_NAME>\n"
+      printf "\t-h print this message\n"
+      printf "\t-m <PKG_MANIFEST_FILE>\n"
+      printf "\t-r <REPO_RPM_URIs>\n"
+      echo "  GNU long options:"
+      printf "\t--bonusrepos <REPOS_TO_ACTIVATE>\n"
+      printf "\t--extras <EXTRA_RPMS>\n"
+      printf "\t--help print this message\n"
+      printf "\t--pkg-manifest <PKG_MANIFEST_FILE>\n"
+      printf "\t--repouri <REPO_RPM_URIs>\n"
+      printf "\t--rpm-group <RPM_GROUP_NAME>\n"
+   )
+   exit 1
+}
+
+function PrepChroot() {
+
+   if [ -f "/etc/oracle-release" ]
+   then
+      # we cannot install oraclelinux-release-el7.rpm due to script dependencies to other RPMs
+      # => the strategy from CentOS/RHEL could not be used here...
+      local REPOPKGS="yum-utils"
+
+      # setup some public-yum settings for onPremise installations
+      mkdir -p "${CHROOT}/etc/yum/vars"
+      touch "${CHROOT}/etc/yum/vars/ociregion"
+
+      mkdir -p "${CHROOT}/etc/yum.repos.d"
+      # copy repositoryfiles manually
+      cp /etc/yum.repos.d/*ol7.repo "${CHROOT}/etc/yum.repos.d"
+   else
+      local REPOPKGS=($(echo \
+                        "$(rpm --qf '%{name}\n' -qf /etc/redhat-release)" ; \
+                        echo "$(rpm --qf '%{name}\n' -qf \
+                              /etc/yum.repos.d/* 2>&1 | \
+                              grep -v "not owned" | sort -u)" ; \
+                        echo yum-utils
+                     ))
+   fi
    # Enable DNS resolution in the chroot
    if [[ ! -e ${CHROOT}/etc/resolv.conf ]]
    then
@@ -53,6 +111,8 @@ function PrepChroot() {
       install -d -m 0755 "${CHROOT}/etc/rc.d/init.d"
    fi
 
+   # cleanup RPMs from previous runs
+   rm -f /tmp/*.rpm
    yumdownloader --destdir=/tmp "${REPOPKGS[@]}"
    rpm --root "${CHROOT}" --initdb
    rpm --root "${CHROOT}" -ivh --nodeps /tmp/*.rpm
@@ -84,7 +144,7 @@ function PrepChroot() {
 ######################
 
 # See if we'e passed any valid flags
-OPTIONBUFR=$(getopt -o r:b:e: --long repouri:bonusrepos:extras: -n "${PROGNAME}" -- "$@")
+OPTIONBUFR=$(getopt -o r:b:e:g:hm: --long repouri:,bonusrepos:,extras:,help,pkg-manifest:,rpm-group -n "${PROGNAME}" -- "$@")
 eval set -- "${OPTIONBUFR}"
 
 while true
@@ -129,6 +189,35 @@ do
 	       ;;
 	 esac
 	 ;;
+      -h|--help)
+         UsageMsg
+         ;;
+      -m|--pkg-manifest)
+         case "$2" in
+	    "")
+	       echo "Error: option required but not specified" > /dev/stderr
+	       shift 2;
+	       exit 1
+	       ;;
+	    *)
+	       MANIFESTFILE="${2}"
+	       shift 2;
+	       ;;
+	 esac
+	 ;;
+      -g|--rpm-group)
+         case "$2" in
+	    "")
+	       echo "Error: option required but not specified" > /dev/stderr
+	       shift 2;
+	       exit 1
+	       ;;
+	    *)
+	       RPMGRP="${2}"
+	       shift 2;
+	       ;;
+	 esac
+         ;;
       --)
          shift
 	 break
@@ -167,7 +256,77 @@ case "${FIPSDISABLE}" in
 esac
 
 # Setup the "include" package list
-INCLUDE_PKGS=($(yum groupinfo core 2>&1 | sed -n '/Mandatory/,/Optional Packages:/p' | sed -e '/^ [A-Z]/d' -e 's/^[[:space:]]*[-=+[:space:]]//'))
+
+# Use manifest file if found and non-empty
+if [[ ! -z ${MANIFESTFILE} ]] && [[ -s ${MANIFESTFILE} ]]
+then
+   echo "Selecting packages from ${MANIFESTFILE}..."
+   INCLUDE_PKGS=($( < "${MANIFESTFILE}" ))
+# Pull manifest data from yum repository group metadata
+else
+   echo "Installing default package (@${RPMGRP}) from repo group-list..."
+
+   # Simple case
+   if [[ ${RPMGRP} == core ]]
+   then
+      # shellcheck disable=SC2086
+      INCLUDE_PKGS=( $(yum groupinfo ${RPMGRP} 2>&1 | \
+         sed -n '/Mandatory/,/Optional Packages:/p' | \
+         sed -e '/^ [A-Z]/d' -e 's/^[[:space:]]*[-=+[:space:]]//' ) )
+   # Deal with super-groups
+   else
+      GROUPINFO="$( yum -q groupinfo "${RPMGRP}" 2> /dev/null )"
+
+      if [[ -n ${GROUPINFO} ]]
+      then
+         SUBGROUPS=( $( echo "${GROUPINFO}" | \
+            sed -n -e '/Mandatory Groups:/,/Optional Groups:/p' | \
+            sed -e '/:$/d' -e 's/^\s*+//' ) )
+      else
+         printf "Group '%s' is not valid\n" "${RPMGRP}"
+         exit 1
+      fi
+
+
+      # Expand sub-groups to lists of RPMs
+      if [[ -n ${SUBGROUPS[*]} ]]
+      then
+         printf "Found following sub-groups in '%s': %s\n" "${RPMGRP}" "${SUBGROUPS[*]}"
+
+         # Work around "no groups availble on fresh installs"
+         # shortcoming (per BZ #1073484)
+         yum groups mark convert
+
+         for PKGGRP in ${SUBGROUPS[*]}
+         do
+            IFS=$'\n' read -r -d '' -a EXPANDED < <( yum groupinfo "${PKGGRP}" | \
+               sed -n -e '/Description:/,/Optional Packages:/p' | \
+               sed -e '/[a-z]*:/d' -e 's/^\s*[+=-]*//' && printf '\0' )
+
+            # Expand PKGLIST array as appropriate
+            if [[ ${#PKGLIST[@]} -gt 0 ]] && [[ ${#EXPANDED[@]} -gt 0 ]]
+            then
+               PKGLIST=( "${PKGLIST[@]}" "${EXPANDED[@]}" )
+            elif [[ ${#PKGLIST[@]} -eq 0 ]] && [[ ${#EXPANDED[@]} -gt 0 ]]
+            then
+               PKGLIST=( "${EXPANDED[@]}" )
+            fi
+            EXPANDED=()
+         done
+      fi
+      INCLUDE_PKGS=( "${PKGLIST[@]}" )
+   fi
+fi
+
+# Detect if target-reposity has requisite metadata
+if [[ ${INCLUDE_PKGS[*]} == "" ]]
+then
+   echo "Unable to fetch group metadata from target yum-repository. ABORTING."
+   exit 1
+else
+   echo "Fetched group metadata from target yum-repository."
+fi
+
 INCLUDE_PKGS+=($(rpm --qf '%{name}\n' -qf /etc/yum.repos.d/* 2>&1 | grep -v "not owned" | sort -u || true))
 INCLUDE_PKGS+=(
     authconfig
