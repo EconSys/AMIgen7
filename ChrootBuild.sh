@@ -329,7 +329,6 @@ fi
 
 INCLUDE_PKGS+=($(rpm --qf '%{name}\n' -qf /etc/yum.repos.d/* 2>&1 | grep -v "not owned" | sort -u || true))
 INCLUDE_PKGS+=(
-    authconfig
     chrony
     cloud-init
     cloud-utils-growpart
