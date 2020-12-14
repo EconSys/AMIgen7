@@ -115,7 +115,7 @@ function CarveLVM {
    # Let's only attempt this if we're a secondary EBS
    if [[ ${CHROOTDEV} == /dev/xvda ]] || [[ ${CHROOTDEV} == /dev/nvme0n1 ]]
    then
-      echo "Skipping explicit pvcreate opertion... "
+      echo "Skipping explicit pvcreate opertion... " 
    else
       pvcreate "${CHROOTDEV}${PARTPRE}2" || LogBrk 5 "PV creation failed. Aborting!"
    fi
